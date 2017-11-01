@@ -7,10 +7,10 @@ Methods to build FaceGen models.
 
 from keras import backend as K
 from keras.layers import BatchNormalization, Convolution2D, Dense, LeakyReLU, \
-        Input, MaxPooling2D, merge, Reshape, UpSampling2D
+        Input, MaxPooling2D, merge, concatenate, Reshape, UpSampling2D, Conv2D
 from keras.models import Model
 
-from .instance import Emotion, NUM_YALE_POSES
+from .instance import Emotion, EmotionDynamic, NUM_YALE_POSES
 
 
 def build_model(identity_len=57, orientation_len=2, lighting_len=4,
@@ -39,9 +39,10 @@ def build_model(identity_len=57, orientation_len=2, lighting_len=4,
         num_kernels = [128, 128, 96, 96, 32, 32, 16]
 
     # TODO: Parameter validation
-
+    print(identity_len)
     identity_input = Input(shape=(identity_len,), name='identity')
-
+    print(orientation_len)
+    print(emotion_len)
     if use_yale:
         lighting_input = Input(shape=(lighting_len,), name='lighting')
         pose_input = Input(shape=(pose_len,), name='pose')
@@ -49,13 +50,15 @@ def build_model(identity_len=57, orientation_len=2, lighting_len=4,
         orientation_input = Input(shape=(orientation_len,), name='orientation')
         emotion_input = Input(shape=(emotion_len,), name='emotion')
 
+
     # Hidden representation for input parameters
 
     fc1 = LeakyReLU()( Dense(512)(identity_input) )
     fc2 = LeakyReLU()( Dense(512)(lighting_input if use_yale else orientation_input) )
     fc3 = LeakyReLU()( Dense(512)(pose_input if use_yale else emotion_input) )
 
-    params = merge([fc1, fc2, fc3], mode='concat')
+    params = concatenate([fc1, fc2, fc3])#, mode='concat')
+    #params = merge([fc1, fc2, fc3], mode='concat')
     params = LeakyReLU()( Dense(1024)(params) )
 
     # Apply deconvolution layers
@@ -72,31 +75,30 @@ def build_model(identity_len=57, orientation_len=2, lighting_len=4,
 
     for i in range(0, deconv_layers):
         # Upsample input
-        x = UpSampling2D((2,2))(x)
+        x = UpSampling2D((2, 2))(x)
 
         # Apply 5x5 and 3x3 convolutions
 
         # If we didn't specify the number of kernels to use for this many
         # layers, just repeat the last one in the list.
         idx = i if i < len(num_kernels) else -1
-        x = LeakyReLU()( Convolution2D(num_kernels[idx], 5, 5, border_mode='same')(x) )
-        x = LeakyReLU()( Convolution2D(num_kernels[idx], 3, 3, border_mode='same')(x) )
+        x = LeakyReLU()( Conv2D(num_kernels[idx], (5, 5), padding='same')(x) )
+        x = LeakyReLU()( Conv2D(num_kernels[idx], (3, 3), padding='same')(x) )
         x = BatchNormalization()(x)
 
     # Last deconvolution layer: Create 3-channel image.
     x = MaxPooling2D((1,1))(x)
     x = UpSampling2D((2,2))(x)
-    x = LeakyReLU()( Convolution2D(8, 5, 5, border_mode='same')(x) )
-    x = LeakyReLU()( Convolution2D(8, 3, 3, border_mode='same')(x) )
-    x = Convolution2D(1 if use_yale or use_jaffe else 3, 3, 3,
-                      border_mode='same', activation='sigmoid')(x)
+    x = LeakyReLU()( Conv2D(8, (5, 5), padding='same')(x) )
+    x = LeakyReLU()( Conv2D(8, (3, 3), padding='same')(x) )
+    x = Conv2D(1 if use_yale or use_jaffe else 3, (3, 3), padding='same', activation='sigmoid')(x)
 
     # Compile the model
 
     if use_yale:
-        model = Model(input=[identity_input, pose_input, lighting_input], output=x)
+        model = Model(inputs=[identity_input, pose_input, lighting_input], outputs=x)
     else:
-        model = Model(input=[identity_input, orientation_input, emotion_input], output=x)
+        model = Model(inputs=[identity_input, orientation_input, emotion_input], outputs=x)
 
     # TODO: Optimizer options
     model.compile(optimizer=optimizer, loss='msle')

@@ -101,7 +101,8 @@ class GenParser:
                 'emotion': np.empty((1, Emotion.length())),
                 'orientation': np.empty((1, 2)),
             }
-
+            print("Generate inputs for single image")
+            print(inputs)
             inputs['identity'][0,:] = self.identity_vector(params['id'], params)
             inputs['emotion'][0,:] = self.emotion_vector(params['em'], params)
             inputs['orientation'][0,:] = self.orientation_vector(params['or'], params)

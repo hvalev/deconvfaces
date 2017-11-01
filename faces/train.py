@@ -11,15 +11,17 @@ from keras.models import load_model
 import numpy as np
 import scipy.misc
 
+from .modeldesc import ModelDescription
+
 from .instance import (
-    Emotion, RaFDInstances, YaleInstances, JAFFEInstances, NUM_YALE_POSES)
+    Emotion, EmotionDynamic, RaFDInstances, YaleInstances, JAFFEInstances, NUM_YALE_POSES)
 from .model import build_model
 
 
 class GenerateIntermediate(Callback):
     """ Callback to generate intermediate images after each epoch. """
 
-    def __init__(self, output_dir, num_identities, batch_size=32, use_yale=False,
+    def __init__(self, output_dir, instances, batch_size=32, use_yale=False,
                  use_jaffe=False):
         """
         Constructor for a GenerateIntermediate object.
@@ -33,7 +35,7 @@ class GenerateIntermediate(Callback):
         super(Callback, self).__init__()
 
         self.output_dir = output_dir
-        self.num_identities = num_identities
+        self.num_identities = instances.num_identities
         self.batch_size = batch_size
         self.use_yale = use_yale
         self.use_jaffe = use_jaffe
@@ -41,22 +43,25 @@ class GenerateIntermediate(Callback):
         self.parameters = dict()
 
         # Sweep through identities
-        self.parameters['identity'] = np.eye(num_identities)
+        self.parameters['identity'] = np.eye(instances.num_identities)
 
         if use_yale:
             # Use pose 0, lighting at 0deg azimuth and elevation
-            self.parameters['pose'] = np.zeros((num_identities, NUM_YALE_POSES))
-            self.parameters['lighting'] = np.zeros((num_identities, 4))
-            for i in range(0, num_identities):
+            self.parameters['pose'] = np.zeros((instances.num_identities, NUM_YALE_POSES))
+            self.parameters['lighting'] = np.zeros((instances.num_identities, 4))
+            for i in range(0, instances.num_identities):
                 self.parameters['pose'][i,0] = 0
                 self.parameters['lighting'][i,1] = 1
                 self.parameters['lighting'][i,3] = 1
         else:
             # Make all have neutral expressions, front-facing
-            self.parameters['emotion'] = np.empty((num_identities, Emotion.length()))
-            self.parameters['orientation'] = np.zeros((num_identities, 2))
-            for i in range(0, num_identities):
+            # TODO fix this
+            self.parameters['emotion'] = np.empty((instances.num_identities, Emotion.length()))
+            self.parameters['orientation'] = np.zeros((instances.num_identities, 2))
+            for i in range(0, instances.num_identities):
                 self.parameters['emotion'][i,:] = Emotion.neutral
+                #p = EmotionDynamic()
+                #p.getEmotionVector("neutral");
                 self.parameters['orientation'][i,1] = 1
 
 
@@ -98,7 +103,7 @@ class GenerateIntermediate(Callback):
 def train_model(data_dir, output_dir, model_file='', batch_size=32,
                 num_epochs=100, optimizer='adam', deconv_layers=5,
                 use_yale=False, use_jaffe=False,
-                kernels_per_layer=None, generate_intermediate=False,
+                kernels_per_layer=None, generate_intermediate=True,
                 verbose=False):
     """
     Trains the model on the data, generating intermediate results every epoch.
@@ -121,9 +126,23 @@ def train_model(data_dir, output_dir, model_file='', batch_size=32,
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    instances = (YaleInstances(data_dir) if use_yale
-                 else JAFFEInstances(data_dir) if use_jaffe
-                 else RaFDInstances(data_dir))
+    model_path = os.path.join(output_dir, 'FaceGen.{}.model.d{}.{}.h5'
+                              .format('YaleFaces' if use_yale else 'JAFFE' if use_jaffe else 'RaFD', deconv_layers,
+                                      optimizer))
+
+    # writing the model description
+    mDesc = ModelDescription()
+    mDesc.genPathFromModelName(model_path)
+    mDesc.importVariablesFromModelName()
+    mDesc.save()
+
+
+    if use_yale:
+        instances = YaleInstances(data_dir)
+    elif use_jaffe:
+        instances = JAFFEInstances(data_dir)
+    else:
+        instances = RaFDInstances(data_dir, mDesc.getAttr('path'))
 
     if verbose:
         print("Found {} instances with {} identities".format(
@@ -144,8 +163,14 @@ def train_model(data_dir, output_dir, model_file='', batch_size=32,
         if use_jaffe:
             initial_shape = (4,4)
 
+        print("Selected Identities from Dataset: {}".format(instances.num_identities))
+        print("Selected Orientations from Dataset: {}".format(instances.num_orientations))
+        print("Selected Emotions from Dataset: {}".format(instances.num_emotions))
+
         model = build_model(
             identity_len  = instances.num_identities,
+            orientation_len=2,
+            emotion_len   = instances.num_emotions,
             deconv_layers = deconv_layers,
             num_kernels   = kernels_per_layer,
             optimizer     = optimizer,
@@ -160,15 +185,16 @@ def train_model(data_dir, output_dir, model_file='', batch_size=32,
 
     # Create training callbacks
 
+
+
+
+
     callbacks = list()
 
     if generate_intermediate:
         intermediate_dir = os.path.join(output_dir, 'intermediate.d{}.{}'.format(deconv_layers, optimizer))
-        callbacks.append( GenerateIntermediate(intermediate_dir, instances.num_identities,
+        callbacks.append(GenerateIntermediate(intermediate_dir, instances,
                                                use_yale=use_yale, use_jaffe=use_jaffe) )
-
-    model_path = os.path.join(output_dir, 'FaceGen.{}.model.d{}.{}.h5'
-            .format('YaleFaces' if use_yale else 'JAFFE' if use_jaffe else 'RaFD', deconv_layers, optimizer))
 
     callbacks.append(
         ModelCheckpoint(
@@ -190,13 +216,23 @@ def train_model(data_dir, output_dir, model_file='', batch_size=32,
     else:
         image_size = model.output_shape[1:3]
 
-    inputs, outputs = instances.load_data(image_size, verbose=verbose)
-
+    inputs, outputs = instances.load_data(image_size, mDesc.getAttr('path'), verbose=verbose)
+    #print(inputs)
     if verbose:
         print("Training...")
 
-    model.fit(inputs, outputs, batch_size=batch_size, nb_epoch=num_epochs,
+
+    #for p,x in inputs:
+    #    print(x)
+    #print(inputs)
+    #print(outputs.shape)
+    ''''
+    model.fit(inputs, outputs, batch_size=batch_size, epochs=num_epochs,
             callbacks=callbacks, shuffle=True, verbose=1)
+    '''
+
+
+
 
     if verbose:
         print("Done!")

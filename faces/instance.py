@@ -10,10 +10,11 @@ import csv
 
 from keras import backend as K
 
+from .modeldesc import ModelDescription
+
 import numpy as np
 import scipy.misc as misc
 from tqdm import tqdm
-
 
 NUM_YALE_POSES = 10
 
@@ -21,25 +22,61 @@ NUM_YALE_POSES = 10
 # ---- Enum classes for vector descriptions
 
 class Emotion:
-    angry         = [1., 0., 0., 0., 0., 0., 0., 0.]
-    contemptuous  = [0., 1., 0., 0., 0., 0., 0., 0.]
-    disgusted     = [0., 0., 1., 0., 0., 0., 0., 0.]
-    fearful       = [0., 0., 0., 1., 0., 0., 0., 0.]
-    happy         = [0., 0., 0., 0., 1., 0., 0., 0.]
-    neutral       = [0., 0., 0., 0., 0., 1., 0., 0.]
-    sad           = [0., 0., 0., 0., 0., 0., 1., 0.]
-    surprised     = [0., 0., 0., 0., 0., 0., 0., 1.]
+    angry = [1., 0., 0., 0., 0., 0., 0., 0.]
+    contemptuous = [0., 1., 0., 0., 0., 0., 0., 0.]
+    disgusted = [0., 0., 1., 0., 0., 0., 0., 0.]
+    fearful = [0., 0., 0., 1., 0., 0., 0., 0.]
+    happy = [0., 0., 0., 0., 1., 0., 0., 0.]
+    neutral = [0., 0., 0., 0., 0., 1., 0., 0.]
+    sad = [0., 0., 0., 0., 0., 0., 1., 0.]
+    surprised = [0., 0., 0., 0., 0., 0., 0., 1.]
 
     @classmethod
     def length(cls):
         return len(Emotion.neutral)
 
 
+class EmotionDynamic:
+    emotions = {'angry', 'contemptuous', 'disgusted', 'fearful', 'happy', 'neutral', 'sad', 'surprised'}
+
+    def getVector(self, emotion_map, emotion):
+        f = np.zeros(len(emotion_map))
+        f[emotion_map[emotion]] = 1
+        return f
+    '''
+    def getAllEmotionsCount(self,allEmotions):
+        return len(np.unique(allEmotions))
+
+    def getEmotionVector(self, allEmotions, emotion):
+        """
+        Emotions not yet mapped to specific vectors
+        Emotions are also alphabetically sorted
+        """
+        allUniqueEmotions = np.unique(allEmotions)
+        incr = 0
+        for e in self.emotions:
+            if e in allUniqueEmotions:
+                incr += 1
+
+            if e == emotion:
+                f = np.zeros(len(allUniqueEmotions)+1)
+                f[incr] = 1
+                return [0.,1.,1.]
+                return f
+    
+                idx = np.eye(len(allUniqueEmotions))
+                idx = np.rot90(idx, 1)
+                f = np.zeros(len(allUniqueEmotions))
+                f[incr] = 1
+                return idx.dot(f)
+                
+        pass
+
+    '''
 # ---- Loading functions
 
 class RaFDInstances:
-
-    def __init__(self, directory):
+    def __init__(self, directory, model_desc_path):
         """
         Constructor for a RaFDInstances object.
 
@@ -51,26 +88,71 @@ class RaFDInstances:
 
         # A list of all files in the current directory (no kids, only frontal gaze)
         self.filenames = [x for x in os.listdir(directory)
-                if 'Kid' not in x and 'frontal' in x]
+                          if 'Kid' not in x and 'frontal' in x and 'Rafd090' in x and (
+                          'sad' in x or 'neutral' in x or 'happy' in x)]
+
+        print("Amount of files loaded: " + str(len(self.filenames)))
 
         # The number of times the directory has been read over
         self.num_iterations = 0
 
         # Count identities and map each identity present to a contiguous value
         identities = list()
+        emotions = []
+        orientations = list()
         for filename in self.filenames:
-            identity = int(filename.split('_')[1])-1 # Identities are 1-indexed
+            identity = int(filename.split('_')[1]) - 1  # Identities are 1-indexed
             if identity not in identities:
                 identities.append(identity)
+            emotion = filename.split('_')[4]
+            if emotion not in emotions:
+                emotions.append(emotion)
+            orientation = filename.split('_')[0][4:7]
+            if orientation not in orientations:
+                orientations.append(orientation)
+
+        mDesc = ModelDescription()
+        mDesc.loadFromPath(model_desc_path)
+        mDesc.setAttr('emotions',emotions)
+
         self.identity_map = dict()
         for idx, identity in enumerate(identities):
             self.identity_map[identity] = idx
-
         self.num_identities = len(self.identity_map)
+
+        self.emotions_map = dict()
+        for idx, emotion in enumerate(emotions):
+            #reverse, so its 'happy' => 0, etc, because then we create the identity vector for the input from the dict
+            self.emotions_map[emotion] = idx
+        self.num_emotions = len(self.emotions_map)
+
+        self.orientations_map = dict()
+        for idx, orientation in enumerate(orientations):
+            self.orientations_map[orientation] = idx
+        self.num_orientations = len(self.orientations_map)
+
         self.num_instances = len(self.filenames)
 
+        mDesc.setAttr('num_identities', self.num_identities)
+        mDesc.setAttr('num_emotions', self.num_emotions)
+        mDesc.setAttr('num_orientations', self.num_orientations)
+        mDesc.save()
 
-    def load_data(self, image_size, verbose=False):
+    def getEmotions(self):
+        emotions = []
+        for filename in self.filenames:
+            items = filename.split('_')
+            emotions.append(items[4])
+        return emotions
+
+    def getOrientations(self):
+        orientations = []
+        for filename in self.filenames:
+            items = filename.split('_')
+            orientations.append(items[0][4:7])
+        return orientations
+
+    def load_data(self, image_size, model_desc_path, verbose=False):
         """
         Loads RaFD data for training.
 
@@ -81,38 +163,42 @@ class RaFDInstances:
             numpy.ndarray, output data (the actual images to generate).
         """
 
+        mDesc = ModelDescription()
+        mDesc.loadFromPath(model_desc_path)
+        mDesc.print()
+        #TODO could replace this with data from the modelDesc file
         inputs = {
-            'emotion'    : np.empty((self.num_instances, len(Emotion.neutral))),
-            'identity'   : np.empty((self.num_instances, self.num_identities)),
+            'emotion': np.empty((self.num_instances, self.num_emotions)),
+            'identity': np.empty((self.num_instances, self.num_identities)),
             'orientation': np.empty((self.num_instances, 2)),
         }
 
         if K.image_dim_ordering() == 'th':
-            outputs = np.empty((self.num_instances, 3)+image_size)
+            outputs = np.empty((self.num_instances, 3) + image_size)
         else:
-            outputs = np.empty((self.num_instances,)+image_size+(3,))
+            outputs = np.empty((self.num_instances,) + image_size + (3,))
 
         all_instances = range(0, len(self.filenames))
         if verbose:
             all_instances = tqdm(all_instances)
 
         for i in all_instances:
-            instance = RaFDInstance(self.directory, self.filenames[i], image_size)
+            instance = RaFDInstance(self.directory, self.filenames[i], image_size, self.emotions_map)
 
-            inputs['emotion'][i,:] = instance.emotion
-            inputs['identity'][i,:] = instance.identity_vector(self.identity_map)
-            inputs['orientation'][i,:] = instance.orientation
+            inputs['identity'][i, :] = instance.identity_vector(self.identity_map)
+            inputs['orientation'][i, :] = instance.orientation
+            inputs['emotion'][i, :] = instance.emotion
 
+            #print(inputs)
             if K.image_dim_ordering() == 'th':
-                outputs[i,:,:,:] = instance.th_image()
+                outputs[i, :, :, :] = instance.th_image()
             else:
-                outputs[i,:,:,:] = instance.tf_image()
+                outputs[i, :, :, :] = instance.tf_image()
 
         return inputs, outputs
 
 
 class YaleInstances:
-
     def __init__(self, directory):
         """
         Constructor for a YaleInstances object.
@@ -136,13 +222,12 @@ class YaleInstances:
         for subdir in subdirs:
             path = os.path.join(directory, subdir)
             self.filenames.extend(
-                [os.path.join(subdir,x) for x in os.listdir(path)
-                    if 'pgm' in x
-                    and 'Ambient' not in x]
+                [os.path.join(subdir, x) for x in os.listdir(path)
+                 if 'pgm' in x
+                 and 'Ambient' not in x]
             )
 
         self.num_instances = len(self.filenames)
-
 
     def load_data(self, image_size, verbose=False):
         """
@@ -156,15 +241,15 @@ class YaleInstances:
         """
 
         inputs = {
-            'identity' : np.empty((self.num_instances, self.num_identities)),
-            'pose'     : np.empty((self.num_instances, NUM_YALE_POSES)),
-            'lighting' : np.empty((self.num_instances, 4)),
+            'identity': np.empty((self.num_instances, self.num_identities)),
+            'pose': np.empty((self.num_instances, NUM_YALE_POSES)),
+            'lighting': np.empty((self.num_instances, 4)),
         }
 
         if K.image_dim_ordering() == 'th':
-            outputs = np.empty((self.num_instances, 1)+image_size)
+            outputs = np.empty((self.num_instances, 1) + image_size)
         else:
-            outputs = np.empty((self.num_instances,)+image_size+(1,))
+            outputs = np.empty((self.num_instances,) + image_size + (1,))
 
         all_instances = range(0, len(self.filenames))
         if verbose:
@@ -173,14 +258,16 @@ class YaleInstances:
         for i in all_instances:
             instance = YaleInstance(self.directory, self.filenames[i], image_size)
 
-            inputs['identity'][i,:] = instance.identity_vector(self.identity_map)
-            inputs['pose'][i,:] = instance.pose
-            inputs['lighting'][i,:] = instance.lighting
+            inputs['identity'][i, :] = instance.identity_vector(self.identity_map)
+            inputs['pose'][i, :] = instance.pose
+            inputs['lighting'][i, :] = instance.lighting
 
             if K.image_dim_ordering() == 'th':
-                outputs[i,:,:,:] = instance.th_image()
+                outputs[i, :, :, :] = instance.th_image()
             else:
-                outputs[i,:,:,:] = instance.tf_image()
+                outputs[i, :, :, :] = instance.tf_image()
+
+        print(inputs)
 
         return inputs, outputs
 
@@ -231,7 +318,7 @@ class JAFFEInstances:
         # note that there is no explicit JAFFE neutral, it is implied when
         # no specific emotion dominates.
         emotions = ('ANG', '_', 'DIS', 'FEA', 'HAP', 'NEU', 'SAD', 'SUR')
-        emotion_map = {emotion:idx for idx, emotion in enumerate(emotions)}
+        emotion_map = {emotion: idx for idx, emotion in enumerate(emotions)}
         ratings = {}
         with open(os.path.join(self.directory, 'semantic-ratings.csv')) as rows:
             reader = csv.DictReader(rows)
@@ -267,13 +354,14 @@ class JAFFEInstances:
             # each row in inst_idents is a one-hot encoding of identity idx
             inst_idents[idx, self.identity_map[inst.identity]] = 1
 
-        inst_orient = np.tile((0, 1), self.num_instances).reshape(-1,2)
+        inst_orient = np.tile((0, 1), self.num_instances).reshape(-1, 2)
+        print(inst_orient)
         ratings = self.load_semantic_ratings()
         # Note: there are some scored instance N's with no instance file!
         inst_emotion = np.array([ratings[inst.N] for inst in instances])
 
         inputs = {
-            'identity': inst_idents, # 1-hot
+            'identity': inst_idents,  # 1-hot
             'orientation': inst_orient,
             'emotion': inst_emotion,
         }
@@ -281,10 +369,10 @@ class JAFFEInstances:
             self.num_identities, self.num_instances))
         if K.image_dim_ordering() == 'th':
             inst_image = [inst.th_image() for inst in instances]
-            outputs = np.empty((self.num_instances, 1)+image_size)
+            outputs = np.empty((self.num_instances, 1) + image_size)
         else:
             inst_image = [inst.tf_image() for inst in instances]
-            outputs = np.empty((self.num_instances,)+image_size+(1,))
+            outputs = np.empty((self.num_instances,) + image_size + (1,))
         outputs[np.arange(self.num_instances)] = inst_image
 
         return inputs, outputs
@@ -297,7 +385,7 @@ class RaFDInstance:
     Holds information about each RaFD example.
     """
 
-    def __init__(self, directory, filename, image_size, trim=24, top=24):
+    def __init__(self, directory, filename, image_size, emotions_map, trim=24, top=24):
         """
         Constructor for an RaFDInstance object.
 
@@ -310,37 +398,42 @@ class RaFDInstance:
             top (int): How much extra to trim off the top.
         """
 
-        self.image = misc.imread( os.path.join(directory, filename) )
+        self.image = misc.imread(os.path.join(directory, filename))
 
         # Trim the image to get more of the face
-
+        # TODO center images relative to each other, scaling relative to each other, preprossessing, etc?
+        # TODO for the newly captured dataset
         height, width, d = self.image.shape
 
-        width = int(width-2*trim)
-        height = int(width*image_size[0]/image_size[1])
+        width = int(width - 2 * trim)
+        height = int(width * image_size[0] / image_size[1])
 
-        self.image = self.image[trim+top:trim+height,trim:trim+width,:]
+        self.image = self.image[trim + top:trim + height, trim:trim + width, :]
 
         # Resize and fit between 0-1
-        self.image = misc.imresize( self.image, image_size )
+        self.image = misc.imresize(self.image, image_size)
         self.image = self.image / 255.0
 
-        #self.mask  = misc.imread( os.path.join(directory, 'mask',  filename) )
-        #self.mask  = misc.imresize( self.mask, image_size )
-        #self.mask  = self.mask / 255.0
+        # self.mask  = misc.imread( os.path.join(directory, 'mask',  filename) )
+        # self.mask  = misc.imresize( self.mask, image_size )
+        # self.mask  = self.mask / 255.0
 
         # Parse filename to get parameters
 
         items = filename.split('_')
 
         # Represent orientation as sin/cos vector
-        angle = np.deg2rad(float(items[0][-3:])-90)
+        angle = np.deg2rad(float(items[0][-3:]) - 90)
+        #print(angle)
         self.orientation = np.array([np.sin(angle), np.cos(angle)])
 
-        self.identity_index = int(items[1])-1 # Identities are 1-indexed
+        self.identity_index = int(items[1]) - 1  # Identities are 1-indexed
 
-        self.emotion = np.array(getattr(Emotion, items[4]))
 
+        #self.emotion = np.array(getattr(Emotion, items[4]))
+        p = EmotionDynamic()
+        print(p.getVector(emotions_map, items[4]))
+        self.emotion = p.getVector(emotions_map, items[4])
 
     def identity_vector(self, identity_map):
         """
@@ -353,21 +446,19 @@ class RaFDInstance:
         """
 
         identity_vec = np.zeros(len(identity_map), dtype=np.float32)
-        identity_vec[ identity_map[self.identity_index] ] = 1.
+        identity_vec[identity_map[self.identity_index]] = 1.
 
         return identity_vec
-
 
     def th_image(self):
         """
         Returns a Theano-ordered representation of the image.
         """
 
-        image = np.empty((3,)+self.image.shape[0:2])
+        image = np.empty((3,) + self.image.shape[0:2])
         for i in range(0, 3):
-            image[i,:,:] = self.image[:,:,i]
+            image[i, :, :] = self.image[:, :, i]
         return image
-
 
     def tf_image(self):
         """
@@ -395,10 +486,10 @@ class YaleInstance:
 
         filename = filepath.split('/')[-1]
 
-        self.image = misc.imread( os.path.join(directory, filepath) )
+        self.image = misc.imread(os.path.join(directory, filepath))
 
         # Resize and scale values to [0 1]
-        self.image = misc.imresize( self.image, image_size )
+        self.image = misc.imresize(self.image, image_size)
         self.image = self.image / 255.0
 
         self.identity_index = int(filename[5:7])
@@ -413,7 +504,6 @@ class YaleInstance:
 
         self.lighting = np.array([np.sin(az), np.cos(az), np.sin(el), np.cos(el)])
 
-
     def identity_vector(self, identity_map):
         """
         Creates a one-in-k encoding of the instance's identity.
@@ -425,10 +515,9 @@ class YaleInstance:
         """
 
         identity_vec = np.zeros(len(identity_map), dtype=np.float32)
-        identity_vec[ identity_map[self.identity_index] ] = 1.
+        identity_vec[identity_map[self.identity_index]] = 1.
 
         return identity_vec
-
 
     def th_image(self):
         """
@@ -436,7 +525,6 @@ class YaleInstance:
         """
 
         return np.expand_dims(self.image, 0)
-
 
     def tf_image(self):
         """
@@ -463,17 +551,17 @@ class JAFFEInstance:
 
         filename = filepath.split('/')[-1]
 
-        self.image = misc.imread( os.path.join(directory, filepath) )
+        self.image = misc.imread(os.path.join(directory, filepath))
         # some of the jaffe images are 3-channel greyscale, some are 1-channel!
-        self.image = np.atleast_3d(self.image)[...,0] # make image 2d for sure
+        self.image = np.atleast_3d(self.image)[..., 0]  # make image 2d for sure
         # Resize and scale values to [0 1]
-        self.image = misc.imresize( self.image, image_size )
+        self.image = misc.imresize(self.image, image_size)
         self.image = self.image / 255.0
         ident, _, N, _ = filename.split('.')
         # Note: the emotion encoded in the filename is the dominant
         # scoring emotion, but we ignore this and use precise emotion scores
         # from the semantic ratings table
-        self.identity, self.N = ident, int(N) - 1 # 0-based instance numbering
+        self.identity, self.N = ident, int(N) - 1  # 0-based instance numbering
 
     def th_image(self):
         """
@@ -481,7 +569,6 @@ class JAFFEInstance:
         """
 
         return np.expand_dims(self.image, 0)
-
 
     def tf_image(self):
         """
